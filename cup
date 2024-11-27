@@ -1,9 +1,33 @@
-#!/bin/sh
+#!/bin/bash
 set -e
-
 CUP_VERBOSE=false
 
+function fetch_state() {
+	if [ -e /etc/cadmium-update-state ]; then
+		export $(cat /etc/cadmium-update-state)
+	else
+		export STATE=idle
+		export ENABLE_UART=false
+		export KTREE=mainline # FIXME
+		save_state
+	fi
+}
+
+function save_state() {
+	echo "STATE=$STATE" > "/etc/cadmium-update-state"
+	echo "KTREE=$KTREE" >> "/etc/cadmium-update-state"
+	echo "ENABLE_UART=$ENABLE_UART" >> "/etc/cadmium-update-state"
+}
+
 function gather_info() {
+	case "$(uname -m)" in
+		aarch64) ARCH=arm64 ;;
+		*)
+			echo "Unknown architecture: $(uname -m)"
+			exit 1
+		;;
+	esac
+
 	if cat /proc/cmdline | grep -s cros_secure >/dev/null 2>&1; then
 		LOADER=depthcharge
 	elif [ -d "/sys/firmware/efi" ]; then
@@ -13,17 +37,64 @@ function gather_info() {
 		exit 1
 	fi
 
+	# TODO: test on nvme
+	INTDEV="/dev/$(readlink /dev/disk/by-partlabel/IntRoot | grep -o -E '(mmcblk.|nvme.n.)')"
+
+	case "$LOADER" in
+		depthcharge)
+			A_PRIORITY=$(cgpt show -i 1 -P $INTDEV)
+			A_TRIES=$(cgpt show -i 1 -T $INTDEV)
+			A_SUCCESSFUL=$(cgpt show -i 1 -S $INTDEV)
+			B_PRIORITY=$(cgpt show -i 2 -P $INTDEV)
+			B_TRIES=$(cgpt show -i 2 -T $INTDEV)
+			B_SUCCESSFUL=$(cgpt show -i 2 -S $INTDEV)
+			
+			if [ $A_PRIORITY -gt $B_PRIORITY ]; then
+				if [ $A_TRIES -gt 0 -o $A_SUCCESSFUL -gt 0 ]; then
+					CUR_KERNEL=A
+				else
+					CUR_KERNEL=B
+				fi
+			else
+				if [ $B_TRIES -gt 0 -o $B_SUCCESSFUL -gt 0 ]; then
+					CUR_KERNEL=B
+				else
+					CUR_KERNEL=A
+				fi
+			fi
+			if [ "$STATE" = "idle" ]; then
+				[ $CUR_KERNEL = "A" ] && TST_KERNEL=B
+				[ $CUR_KERNEL = "B" ] && TST_KERNEL=A
+			else
+				TST_KERNEL=$CUR_KERNEL
+			fi
+		;;
+	esac
+
 	KVER="$(uname -r)"
 }
 
 function print_info() {
-	gather_info
 	echo "Bootloader: $LOADER"
 	echo "Kernel version: $KVER"
+	case $LOADER in
+		depthcharge)
+			echo "Kernel partition A: P: $A_PRIORITY T: $A_TRIES S: $A_SUCCESSFUL"
+			echo "Kernel partition B: P: $B_PRIORITY T: $B_TRIES S: $B_SUCCESSFUL"
+			echo "Current kernel partition: $CUR_KERNEL"
+			echo "Kernel partition for testing: $TST_KERNEL"
+			;;
+	esac
+	echo "Current cup state: $STATE"
 }
 
 function print_help() {
 	case "$1" in
+		update)
+			printf "$(basename $0) update: Update the kernel\n"
+			printf "Options:\n"
+			printf "\t-f: Force an update even if deemed unnecessary\n"
+		;;
 		*)
 			printf "$(basename $0): Cadmium Update Program\n"
 			printf "Global options:\n"
@@ -36,34 +107,247 @@ function print_help() {
 			printf "\tupdate: Update the kernel\n"
 		;;
 	esac
+	exit 0
 }
 
-function print_status() {
-	true
+function fetch() {
+	curl -sL "https://github.com/CadmiumLinux/kernel/releases/latest/download/$1"
 }
 
 function do_update() {
-	true
+	while getopts ':fh' ARG; do
+		case "$ARG" in
+			f) FORCE_UPDATE=true ;;
+			h) print_help update ;;
+		esac
+	done
+
+	if [ "$STATE" != "idle" ]; then
+		echo "Update is already in progress"
+		exit 1
+	fi
+
+	TMP_PATH="/var/cache/cadmium-update"
+	mkdir -p "$TMP_PATH"
+	cd "$TMP_PATH/extracted"
+
+	LATEST_KRELEASE="$(fetch mainline-arm64-krelease)"
+	if [ "$(uname -r)" = "$LATEST_KRELEASE" ]; then
+		echo "Latest release has the same kernel version as current machine"
+		if [ $FORCE_UPDATE ]; then
+			echo "Updating anyway"
+		else
+			echo "Not updating"
+			exit 0
+		fi
+	fi
+
+	KTREE_NAME="$LATEST_KRELEASE-$KTREE-$ARCH"
+
+	fetch "$KTREE-$ARCH-prebuilt.tar.xz" > "$TMP_PATH/$KTREE_NAME-prebuilt.tar.xz"
+	GITHUB_SHA1=$(fetch "$KTREE-$ARCH-prebuilt.tar.xz.sha1" | cut -c -40)
+	OUR_SHA1="$(sha1sum $TMP_PATH/$KTREE_NAME-prebuilt.tar.xz | cut -c -40)"
+	if [ "$GITHUB_SHA1" != "$OUR_SHA1" ]; then
+		echo "Error matching sha1 sums"
+		exit 1
+	fi
+
+	[ -e "$TMP_PATH/extracted" ] && rm -rf "$TMP_PATH/extracted"
+	mkdir -p "$TMP_PATH/extracted"
+	bsdtar xf "$TMP_PATH/$KTREE_NAME-prebuilt.tar.xz" -C "$TMP_PATH/extracted"
+	cd "$TMP_PATH/extracted"
+
+	# Set up the cmdline
+	CMDLINE="console=tty1 rootwait rw fbcon=logo-pos:center,logo-count:1 loglevel=7"
+	if [ "$ENABLE_UART" = "true" ]; then
+		CMDLINE="console=ttyMSM0,115200 console=ttyS2,115200 console=ttyS0,115200 $CMDLINE"
+	fi
+
+	[ "$TST_KERNEL" = "A" ] && CMDLINE="$CMDLINE root=PARTUUID=%U/PARTNROFF=2"
+	[ "$TST_KERNEL" = "B" ] && CMDLINE="$CMDLINE root=PARTUUID=%U/PARTNROFF=1"
+
+	# Prepare kernel.its
+	# dtbs
+	for B in veyron elm gru kukui trogdor; do
+		DTBS="$DTBS $(find boot/dtbs -name \*${B}\*.dtb)"
+	done
+
+	# Image
+	if [ "$ARCH" = "arm64" ]; then
+		COMPRESSION="lz4"
+		IMAGE="Image.lz4"
+		lz4 -z --best -f "boot/Image" "Image.lz4"
+	else
+		COMPRESSION="none"
+		IMAGE="Image"
+	fi
+
+	echo $DTBS | generate_chromebook_its "$IMAGE" "$ARCH" "$COMPRESSION" > kernel.its
+
+	# and finally get the kernel into depthcharge kernel partition format
+	mkimage -D "-I dts -O dtb -p 2048" -f kernel.its vmlinux.fit >/dev/null
+	echo "$CMDLINE" > cmdline
+	dd if=/dev/zero of=bootloader.bin bs=512 count=1
+
+	vbutil_kernel --pack vmlinux.kpart \
+		--version 1 \
+		--vmlinuz vmlinux.fit \
+		--arch arm \
+		--keyblock /usr/share/vboot/devkeys/kernel.keyblock \
+		--signprivate /usr/share/vboot/devkeys/kernel_data_key.vbprivk \
+		--config cmdline \
+		--bootloader bootloader.bin >/dev/null
+
+	# here's writing the kernel
+	case "$TST_KERNEL" in
+		A)
+			PARTITION="/dev/disk/by-partlabel/IntKernelA"
+			STATE="trying-a"
+			cgpt add -i 1 -P 10 -T 2 -S 0 "$INTDEV"
+			cgpt add -i 2 -P 5 -T 2 -S 1 "$INTDEV"
+			;;
+		B)
+			PARTITION="/dev/disk/by-partlabel/IntKernelB"
+			STATE="trying-b"
+			cgpt add -i 1 -P 5 -T 2 -S 1 "$INTDEV"
+			cgpt add -i 2 -P 10 -T 2 -S 0 "$INTDEV"
+			;;
+	esac
+
+	dd if=vmlinux.kpart of="$PARTITION"
+	if [ -d "/lib/modules/$LATEST_KRELEASE" ]; then
+		echo "Warning: modules for $LATEST_KRELEASE were already found"
+		echo "Moving them to /lib/modules/$LATEST_KRELEASE.bak"
+		rm -rf "/lib/modules/$LATEST_KRELEASE.bak"
+		mv "/lib/modules/$LATEST_KRELEASE" "/lib/modules/$LATEST_KRELEASE.bak"
+	fi
+	cp -r "./lib/modules/$LATEST_KRELEASE" "/lib/modules/$LATEST_KRELEASE"
+	depmod "$LATEST_KRELEASE"
+
+	echo "Done updating, please reboot the system when it's convenient"
 }
 
-while getopts ':vid' ARG; do
-	case "$ARG" in
-		v) export CUP_VERBOSE=true ;;
-		d) set -x ;;
+function on_boot() {
+	case "$STATE" in
+		idle) ;;
+		trying-a)
+			if [ "$CUR_KERNEL" = "A" ]; then
+				cgpt add -i 1 -P 10 -T 2 -S 1 "$INTDEV"
+				echo "Update Successful"
+			else
+				echo "Update failed!"
+				print_info
+			fi
+			STATE="idle"
+		;;
+		trying-b)
+			if [ "$CUR_KERNEL" = "B" ]; then
+				cgpt add -i 2 -P 10 -T 2 -S 1 "$INTDEV"
+				echo "Update successful"
+			else
+				echo "Update failed!"
+				print_info
+			fi
+			STATE="idle"
+		;;
 	esac
+}
+
+function main() {
+	while getopts ':vid' ARG; do
+		case "$ARG" in
+			v) export CUP_VERBOSE=true ;;
+			d) set -x ;;
+			?) break ;;
+		esac
+	done
+	shift $(expr $OPTIND - 1)
+
+	SUBCOMMAND="$1"
+	shift
+
+	fetch_state
+	gather_info
+	case $SUBCOMMAND in
+		info) print_info $@ ;;
+		help) print_help $@ ;;
+		update) do_update $@ ;;
+		boot) on_boot $@ ;;
+		"") print_help $@ ;;
+		*)
+			echo "Error: unknown subcommand: $SUBCOMMAND"
+			print_help
+		;;
+	esac
+	save_state
+}
+
+function generate_chromebook_its() {
+
+image=$1
+arch=$2
+compression=$3
+read -a dtb_list
+
+cat <<-ITS_HEADER_END
+/dts-v1/;
+
+/ {
+    description = "Chrome OS kernel image with one or more FDT blobs";
+    images {
+        kernel {
+            description = "kernel";
+            data = /incbin/("${image}");
+            type = "kernel_noload";
+            arch = "${arch}";
+            os = "linux";
+            compression = "${compression}";
+            load = <0>;
+            entry = <0>;
+        };
+ITS_HEADER_END
+
+for i in ${!dtb_list[@]}; do
+	dtb=${dtb_list[${i}]}
+	cat <<-FDT_END
+	        fdt-$(expr ${i} + 1) {
+	            description = "$(basename ${dtb})";
+	            data = /incbin/("${dtb}");
+	            type = "flat_dt";
+	            arch = "${arch}";
+	            compression = "none";
+	            hash {
+	                algo = "sha1";
+	            };
+	        };
+	FDT_END
 done
-shift $(expr $OPTIND - 1)
 
-SUBCOMMAND="$1"
+cat <<-ITS_MIDDLE_END
+    };
+    configurations {
+        default = "conf-1";
+ITS_MIDDLE_END
 
-case $SUBCOMMAND in
-	info) print_info $@ ;;
-	help) print_help $@ ;;
-	status) print_status $@ ;;
-	update) do_update $@ ;;
-	"") print_help $@ ;;
-	*)
-		echo "Error: unknown subcommand: $SUBCOMMAND"
-		print_help
-	;;
-esac
+for i in "${!dtb_list[@]}"; do
+	compat_line=""
+	dtb_uncompressed=$(echo ${dtb_list[${i}]} | sed "s/\(\.dtb\).*/\1/g")
+	for compat in $(fdtget "${dtb_uncompressed}" / compatible); do
+		compat_line+="\"${compat}\","
+	done
+	cat <<-ITS_CONF_END
+	        conf-$(expr ${i} + 1) {
+	            kernel = "kernel";
+	            fdt = "fdt-$(expr ${i} + 1)";
+	            compatible = ${compat_line%,};
+	        };
+	ITS_CONF_END
+done
+
+cat <<-ITS_FOOTER_END
+    };
+};
+ITS_FOOTER_END
+}
+
+main $@
