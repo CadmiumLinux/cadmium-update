@@ -1,0 +1,11 @@
+[Unit]
+Description=Cadmium update
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+TimeoutSec=0
+ExecStart=/usr/sbin/cup boot
+
+[Install]
+WantedBy=sysinit.target

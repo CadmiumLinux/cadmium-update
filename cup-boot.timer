@@ -1,0 +1,8 @@
+[Unit]
+Description=Delay cup-boot.service by 10 minutes
+
+[Timer]
+OnBootSec=10min
+
+[Install]
+WantedBy=timers.target
