@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 
 CUP_VERBOSE=false
 
@@ -22,18 +23,33 @@ function print_info() {
 }
 
 function print_help() {
-	printf "$(basename $0): Cadmium Update Program\n"
-	printf "Options:\n"
-	printf "\t-v: Enable verbosity\n"
-	printf "Subcommands:\n"
-	printf "\tinfo: Print gathered machine info\n"
-	printf "\thelp: Print help\n"
+	case "$1" in
+		*)
+			printf "$(basename $0): Cadmium Update Program\n"
+			printf "Global options:\n"
+			printf "\t-v: Enable verbosity\n"
+			printf "\t-d: Enable a lot of verbosity\n"
+			printf "Subcommands:\n"
+			printf "\tinfo: Print gathered machine info\n"
+			printf "\thelp: Print help\n"
+			printf "\tstatus: Print current machine state\n"
+			printf "\tupdate: Update the kernel\n"
+		;;
+	esac
 }
 
-while getopts ':vi' ARG; do
-	echo "$ARG"
+function print_status() {
+	true
+}
+
+function do_update() {
+	true
+}
+
+while getopts ':vid' ARG; do
 	case "$ARG" in
 		v) export CUP_VERBOSE=true ;;
+		d) set -x ;;
 	esac
 done
 shift $(expr $OPTIND - 1)
@@ -41,8 +57,11 @@ shift $(expr $OPTIND - 1)
 SUBCOMMAND="$1"
 
 case $SUBCOMMAND in
-	info) print_info ;;
-	help) print_help ;;
+	info) print_info $@ ;;
+	help) print_help $@ ;;
+	status) print_status $@ ;;
+	update) do_update $@ ;;
+	"") print_help $@ ;;
 	*)
 		echo "Error: unknown subcommand: $SUBCOMMAND"
 		print_help
