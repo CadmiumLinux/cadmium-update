@@ -222,7 +222,7 @@ function do_update() {
 		mv "/lib/modules/$LATEST_KRELEASE" "/lib/modules/$LATEST_KRELEASE.bak"
 	fi
 	cp -r "./lib/modules/$LATEST_KRELEASE" "/lib/modules/$LATEST_KRELEASE"
-	depmod "$LATEST_KRELEASE"
+	depmod -aw "$LATEST_KRELEASE"
 
 	echo "Done updating, please reboot the system when it's convenient"
 }
