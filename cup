@@ -2,6 +2,10 @@
 set -e
 CUP_VERBOSE=false
 
+function debug_echo() {
+	$CUP_VERBOSE && echo $@ >&2
+}
+
 function fetch_state() {
 	if [ -e /etc/cadmium-update-state ]; then
 		export $(cat /etc/cadmium-update-state)
@@ -94,6 +98,7 @@ function print_help() {
 			printf "$(basename $0) update: Update the kernel\n"
 			printf "Options:\n"
 			printf "\t-f: Force an update even if deemed unnecessary\n"
+			printf "\t-v [version]: Force an update to a specific version\n"
 		;;
 		*)
 			printf "$(basename $0): Cadmium Update Program\n"
@@ -111,13 +116,18 @@ function print_help() {
 }
 
 function fetch() {
-	curl -sL "https://github.com/CadmiumLinux/kernel/releases/latest/download/$1"
+	if [ -z "$VERSION" ]; then
+		VERSION="latest"
+	fi
+	debug_echo "Downloading https://github.com/CadmiumLinux/kernel/releases/$VERSION/download/$11"
+	curl -sL "https://github.com/CadmiumLinux/kernel/releases/$VERSION/download/$1"
 }
 
 function do_update() {
-	while getopts ':fh' ARG; do
+	while getopts ':fv:h' ARG; do
 		case "$ARG" in
 			f) FORCE_UPDATE=true ;;
+			v) VERSION="$OPTARG" ;;
 			h) print_help update ;;
 		esac
 	done
@@ -131,7 +141,12 @@ function do_update() {
 	mkdir -p "$TMP_PATH"
 	cd "$TMP_PATH/extracted"
 
-	LATEST_KRELEASE="$(fetch mainline-arm64-krelease)"
+	LATEST_KRELEASE=$(fetch mainline-arm64-krelease)
+	if [ "$LATEST_KRELEASE" = "Not Found" ]; then
+		echo "Update not found"
+		exit 1
+	fi
+
 	if [ "$(uname -r)" = "$LATEST_KRELEASE" ]; then
 		echo "Latest release has the same kernel version as current machine"
 		if [ $FORCE_UPDATE ]; then
@@ -326,7 +341,7 @@ if [ "$USER" != "root" ]; then
 	exit 1
 fi
 
-if [ "$?" = "0" ]; then
+if [ "$#" = "0" ]; then
 	print_help
 	exit 1
 fi
