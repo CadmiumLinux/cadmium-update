@@ -247,6 +247,11 @@ function do_update() {
 	echo "Done updating, please reboot the system when it's convenient"
 }
 
+function set_ktree() {
+	KTREE="$1"
+	echo "Ktree updated to $KTREE correctly"
+}
+
 function on_boot() {
 	case "$STATE" in
 		idle) ;;
@@ -371,6 +376,7 @@ case $SUBCOMMAND in
 	help) print_help $@ ;;
 	update) do_update $@ ;;
 	boot) on_boot $@ ;;
+	set-ktree) set_ktree $@ ;;
 	"") print_help $@ ;;
 	*)
 		echo "Error: unknown subcommand: $SUBCOMMAND"
