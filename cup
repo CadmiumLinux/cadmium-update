@@ -124,7 +124,7 @@ function fetch() {
 	if [ -z "$VERSION" ]; then
 		VERSION="latest"
 	fi
-	debug_echo "Downloading https://github.com/CadmiumLinux/kernel/releases/$VERSION/download/$11"
+	debug_echo "Downloading https://github.com/CadmiumLinux/kernel/releases/$VERSION/download/$1"
 	curl -sL "https://github.com/CadmiumLinux/kernel/releases/$VERSION/download/$1"
 }
 
