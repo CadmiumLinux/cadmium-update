@@ -85,6 +85,7 @@ function gather_info() {
 function print_info() {
 	echo "Bootloader: $LOADER"
 	echo "Kernel version: $KVER"
+	echo "Kernel tree name: $KTREE"
 	case $LOADER in
 		depthcharge)
 			echo "Kernel partition A: P: $A_PRIORITY T: $A_TRIES S: $A_SUCCESSFUL"
