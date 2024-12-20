@@ -143,7 +143,7 @@ function do_update() {
 	fi
 
 	TMP_PATH="/var/cache/cadmium-update"
-	mkdir -p "$TMP_PATH"
+	mkdir -p "$TMP_PATH/extracted"
 	cd "$TMP_PATH/extracted"
 
 	LATEST_KRELEASE=$(fetch mainline-arm64-krelease)
