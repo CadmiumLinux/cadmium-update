@@ -12,7 +12,7 @@ function fetch_state() {
 	else
 		export STATE=idle
 		export ENABLE_UART=false
-		export KTREE=mainline # FIXME
+		export KTREE=unknown
 		save_state
 	fi
 }
