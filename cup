@@ -41,8 +41,12 @@ function gather_info() {
 		exit 1
 	fi
 
-	# TODO: test on nvme
-	INTDEV="/dev/$(readlink /dev/disk/by-partlabel/IntRoot | grep -o -E '(mmcblk.|nvme.n.)')"
+	if [ -e "/dev/disk/by-partlabel/IntRoot" ]; then
+		ROOTPATH="/dev/disk/by-partlabel/IntRoot"
+	elif [ -e "/dev/disk/by-partlabel/Root" ]; then
+		ROOTPATH="/dev/disk/by-partlabel/Root"
+	fi
+	INTDEV="/dev/$(readlink $ROOTPATH | grep -o -E '(mmcblk.|nvme.n.)')"
 
 	case "$LOADER" in
 		depthcharge)
