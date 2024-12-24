@@ -125,16 +125,21 @@ function fetch() {
 	if [ -z "$VERSION" ]; then
 		VERSION="latest"
 	fi
-	debug_echo "Downloading https://github.com/CadmiumLinux/kernel/releases/download/$VERSION/$1"
-	curl -sL "https://github.com/CadmiumLinux/kernel/releases/download/$VERSION/$1"
+	if [ -z "$DIST_DIR" ]; then
+		debug_echo "Downloading https://github.com/CadmiumLinux/kernel/releases/download/$VERSION/$1"
+		curl -sL "https://github.com/CadmiumLinux/kernel/releases/download/$VERSION/$1"
+	else
+		cat "$DIST_DIR/$1"
+	fi
 }
 
 function do_update() {
-	while getopts ':fv:h' ARG; do
+	while getopts ':fd:v:h' ARG; do
 		case "$ARG" in
-			f) FORCE_UPDATE=true ;;
-			v) VERSION="$OPTARG" ;;
-			h) print_help update ;;
+			f) FORCE_UPDATE=true  ;;
+			d) DIST_DIR="$OPTARG" ;;
+			v) VERSION="$OPTARG"  ;;
+			h) print_help update  ;;
 		esac
 	done
 
