@@ -3,7 +3,7 @@ set -e
 CUP_VERBOSE=false
 
 function debug_echo() {
-	$CUP_VERBOSE && echo $@ >&2
+	echo $@ >&2
 }
 
 function fetch_state() {
@@ -42,11 +42,11 @@ function gather_info() {
 	fi
 
 	if [ -e "/dev/disk/by-partlabel/IntRoot" ]; then
-		ROOTPATH="/dev/disk/by-partlabel/IntRoot"
+		ROOTPATH="$(readlink -f /dev/disk/by-partlabel/IntRoot)"
 	elif [ -e "/dev/disk/by-partlabel/Root" ]; then
-		ROOTPATH="/dev/disk/by-partlabel/Root"
+		ROOTPATH="$(readlink -f /dev/disk/by-partlabel/Root)"
 	fi
-	INTDEV="/dev/$(readlink $ROOTPATH | grep -o -E '(mmcblk.|nvme.n.)')"
+	INTDEV="$(echo $ROOTPATH | grep -o -E '(/dev/mmcblk.|/dev/nvme.n.)')"
 
 	case "$LOADER" in
 		depthcharge)
@@ -115,6 +115,7 @@ function print_help() {
 			printf "\thelp: Print help\n"
 			printf "\tstatus: Print current machine state\n"
 			printf "\tupdate: Update the kernel\n"
+			printf "\tset-ktree: Override ktree\n"
 		;;
 	esac
 	exit 0
@@ -124,8 +125,8 @@ function fetch() {
 	if [ -z "$VERSION" ]; then
 		VERSION="latest"
 	fi
-	debug_echo "Downloading https://github.com/CadmiumLinux/kernel/releases/$VERSION/download/$1"
-	curl -sL "https://github.com/CadmiumLinux/kernel/releases/$VERSION/download/$1"
+	debug_echo "Downloading https://github.com/CadmiumLinux/kernel/releases/download/$VERSION/$1"
+	curl -sL "https://github.com/CadmiumLinux/kernel/releases/download/$VERSION/$1"
 }
 
 function do_update() {
@@ -146,9 +147,9 @@ function do_update() {
 	mkdir -p "$TMP_PATH/extracted"
 	cd "$TMP_PATH/extracted"
 
-	LATEST_KRELEASE=$(fetch mainline-arm64-krelease)
+	LATEST_KRELEASE="$(fetch $KTREE-arm64-krelease)"
 	if [ "$LATEST_KRELEASE" = "Not Found" ]; then
-		echo "Update not found"
+		echo "$KTREE not found, maybe you have wrong ktree set or set wrong version?"
 		exit 1
 	fi
 
@@ -183,6 +184,48 @@ function do_update() {
 		CMDLINE="console=ttyMSM0,115200 console=ttyS2,115200 console=ttyS0,115200 $CMDLINE"
 	fi
 
+	if grep -q x1e80100 /sys/firmware/devicetree/base/compatible; then
+		echo "Applying clk_ignore_unused hack for x1e80100"
+		CMDLINE="clk_ignore_unused $CMDLINE"
+	fi
+
+	case "$LOADER" in
+		"depthcharge") update_kernel_depthcharge ;;
+		"efi")
+			CMDLINE="$CMDLINE root=$ROOTPATH"
+			if [ "$(bootctl is-installed)" != "yes" ]; then
+				bootctl install
+			else
+				SDBOOT_ESP_SHA="$(sha512sum $(bootctl -p)/efi/systemd/systemd-bootaa64.efi | cut -f 1 -d' ')"
+				SDBOOT_PKG_SHA="$(sha512sum /usr/lib/systemd/boot/efi/systemd-bootaa64.efi | cut -f 1 -d' ')"
+				if [ "$SDBOOT_ESP_SHA" != "$SDBOOT_PKG_SHA" ]; then
+					bootctl update
+				fi
+			fi
+			mkdir -p "/boot/EFI/Linux"
+			ukify build \
+				--uname="$LATEST_KRELEASE" \
+				--linux="./boot/Image" \
+				--cmdline="$CMDLINE" \
+				--os-release="PRETTY_NAME=Cadmium" \
+				--hwids="$(uki_hwids)" \
+				-o "/boot/EFI/Linux/cadmium+3.efi"
+			;;
+	esac
+
+	if [ -d "/lib/modules/$LATEST_KRELEASE" ]; then
+		echo "Warning: modules for $LATEST_KRELEASE were already found"
+		echo "Moving them to /lib/modules/$LATEST_KRELEASE.bak"
+		rm -rf "/lib/modules/$LATEST_KRELEASE.bak"
+		mv "/lib/modules/$LATEST_KRELEASE" "/lib/modules/$LATEST_KRELEASE.bak"
+	fi
+	cp -r "./lib/modules/$LATEST_KRELEASE" "/lib/modules/$LATEST_KRELEASE"
+	depmod -aw "$LATEST_KRELEASE"
+
+	echo "Done updating, please reboot the system when it's convenient"
+}
+
+function update_kernel_depthcharge() {
 	[ "$TST_KERNEL" = "A" ] && CMDLINE="$CMDLINE root=PARTUUID=%U/PARTNROFF=2"
 	[ "$TST_KERNEL" = "B" ] && CMDLINE="$CMDLINE root=PARTUUID=%U/PARTNROFF=1"
 
@@ -235,16 +278,17 @@ function do_update() {
 	esac
 
 	dd if=vmlinux.kpart of="$PARTITION"
-	if [ -d "/lib/modules/$LATEST_KRELEASE" ]; then
-		echo "Warning: modules for $LATEST_KRELEASE were already found"
-		echo "Moving them to /lib/modules/$LATEST_KRELEASE.bak"
-		rm -rf "/lib/modules/$LATEST_KRELEASE.bak"
-		mv "/lib/modules/$LATEST_KRELEASE" "/lib/modules/$LATEST_KRELEASE.bak"
-	fi
-	cp -r "./lib/modules/$LATEST_KRELEASE" "/lib/modules/$LATEST_KRELEASE"
-	depmod -aw "$LATEST_KRELEASE"
 
-	echo "Done updating, please reboot the system when it's convenient"
+}
+
+function uki_hwids() {
+	if [ -d "systemd-stub" ]; then
+		git pull -C systemd-stub
+	else
+		git clone https://github.com/anonymix007/systemd-stub.git
+	fi
+
+	realpath ./systemd-stub/json/
 }
 
 function set_ktree() {
@@ -253,27 +297,41 @@ function set_ktree() {
 }
 
 function on_boot() {
-	case "$STATE" in
-		idle) ;;
-		trying-a)
-			if [ "$CUR_KERNEL" = "A" ]; then
-				cgpt add -i 1 -P 10 -T 2 -S 1 "$INTDEV"
-				echo "Update Successful"
-			else
-				echo "Update failed!"
-				print_info
-			fi
-			STATE="idle"
+	case "$LOADER" in
+		depthcharge)
+			case "$STATE" in
+				idle) ;;
+				trying-a)
+					if [ "$CUR_KERNEL" = "A" ]; then
+						cgpt add -i 1 -P 10 -T 2 -S 1 "$INTDEV"
+						echo "Update Successful"
+					else
+						echo "Update failed!"
+						print_info
+					fi
+					STATE="idle"
+					;;
+				trying-b)
+					if [ "$CUR_KERNEL" = "B" ]; then
+						cgpt add -i 2 -P 10 -T 2 -S 1 "$INTDEV"
+						echo "Update successful"
+					else
+						echo "Update failed!"
+						print_info
+					fi
+					STATE="idle"
+					;;
+			esac
 		;;
-		trying-b)
-			if [ "$CUR_KERNEL" = "B" ]; then
-				cgpt add -i 2 -P 10 -T 2 -S 1 "$INTDEV"
-				echo "Update successful"
-			else
-				echo "Update failed!"
-				print_info
+		efi)
+			EFIVARS="/sys/firmware/efi/efivars/"
+			SD_UUID="4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+			# skip the efivar size
+			UKIPATH="$(dd if=$EFIVARS/LoaderBootCountPath-$SD_UUID bs=4 skip=1 | tr '\\' '/')"
+			NEWPATH="$(echo "$UKIPATH" | sed 's/\+.-.//')"
+			if [ "$UKIPATH" != "$NEWPATH" -a -e "$UKIPATH" ]; then
+				mv "/boot/$UKIPATH" "/boot/$NEWPATH"
 			fi
-			STATE="idle"
 		;;
 	esac
 }
