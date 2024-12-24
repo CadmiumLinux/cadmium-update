@@ -104,6 +104,7 @@ function print_help() {
 			printf "Options:\n"
 			printf "\t-f: Force an update even if deemed unnecessary\n"
 			printf "\t-v [version]: Force an update to a specific version\n"
+			printf "\t-d [directory]: Get kernel files from local directory\n"
 		;;
 		*)
 			printf "$(basename $0): Cadmium Update Program\n"
